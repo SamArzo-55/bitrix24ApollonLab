@@ -1,0 +1,13 @@
+{
+	"name": "custom/portal-app",
+	"description": "Own classes of the portal (loaded from init.php)",
+	"type": "project",
+	"autoload": {
+		"psr-4": {
+			"Custom\\App\\": "src/"
+		}
+	},
+	"config": {
+		"optimize-autoloader": true
+	}
+}

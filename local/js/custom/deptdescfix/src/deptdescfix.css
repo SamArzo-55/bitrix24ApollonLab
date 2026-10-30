@@ -1,0 +1,23 @@
+.hr-department-detail-content-description:not(.dept-desc-linkified) {
+	display: none !important;
+}
+
+.hr-department-detail-content-description.dept-desc-linkified {
+	display: block !important;
+	max-height: none !important;
+	height: auto !important;
+	overflow: visible !important;
+	text-overflow: clip !important;
+	cursor: default;
+	font-size: 16px;
+}
+
+.dept-desc-linkified a {
+	color: #2067b0;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+.dept-desc-linkified a:hover {
+	text-decoration: none;
+}
