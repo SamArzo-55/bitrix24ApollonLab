@@ -5,7 +5,7 @@ use Bitrix\Main\Engine\Controller;
 use Bitrix\Main\Engine\CurrentUser;
 use Bitrix\Main\Error;
 use Bitrix\Main\Localization\Loc;
-use Custom\Toolbarlinks\LinkStorage;
+use Custom\Toolbarlinks\Service\LinkService;
 
 Loc::loadMessages(__FILE__);
 
@@ -19,12 +19,12 @@ class Link extends Controller
         }
 
         $url = trim($url);
-        if (!LinkStorage::isValidCode($code) || !LinkStorage::isSafeUrl($url)) {
+        if (!LinkService::isValidCode($code) || !LinkService::isSafeUrl($url)) {
             $this->addError(new Error((string)Loc::getMessage('CUSTOM_TOOLBARLINKS_ERR_URL'), 'INVALID_URL'));
             return null;
         }
 
-        LinkStorage::setUrl($code, $url);
+        LinkService::setUrl($code, $url);
 
         return ['url' => $url];
     }
