@@ -1,0 +1,10 @@
+.custom-eventfiles-link {
+	color: #2067b0;
+	text-decoration: underline;
+	cursor: pointer;
+	pointer-events: auto;
+}
+
+.custom-eventfiles-link:hover {
+	text-decoration: none;
+}
