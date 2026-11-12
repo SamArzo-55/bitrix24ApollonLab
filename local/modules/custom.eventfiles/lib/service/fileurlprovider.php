@@ -2,22 +2,23 @@
 
 namespace Custom\EventFiles\Service;
 
+use Bitrix\Disk\Driver;
 use Bitrix\Disk\Internals\FileTable;
 use Bitrix\Disk\Internals\FolderTable;
-use Bitrix\Disk\Internals\StorageTable;
+use Bitrix\Disk\Storage;
 use Bitrix\Main\Context;
 use Bitrix\Main\Data\Cache;
+use Bitrix\Sale\Cashbox\FullPrepaymentCheck;
 
 /**
- * Finds Disk files by name and builds Shared Drive file URLs. Access rights are checked by Disk itself.
+ * Finds Shared Drive files by name and builds their URLs.
+ * Only files the current user is allowed to read are returned.
  */
 class FileUrlProvider
 {
 	private const SHARED_STORAGE_ENTITY_PREFIX = 'shared_files_';
 
 	private const SHARED_FILE_URL = '/docs/shared/file/';
-
-	public const MAX_FILE_NAME_LENGTH = 255;
 
 	private const MAX_FOLDER_DEPTH = 50;
 
@@ -26,50 +27,44 @@ class FileUrlProvider
 	private const CACHE_DIR = '/custom/eventfiles/file_urls';
 	private const CACHE_TTL = 300;
 
-	private bool $sharedStorageResolved = false;
-	private ?int $sharedStorageId = null;
-
 	/** @var array<int, array{name: string, parentId: int}> */
 	private array $folders = [];
 
 	/**
-	 * Returns file URLs; for duplicate names the newest file wins.
+	 * Returns URLs of Shared Drive files readable by the current user; for duplicate names the newest readable file wins.
 	 *
 	 * @param string[] $fileNames Unique validated file names.
 	 *
-	 * @return array<string, string> File name => file URL; names missing on Disk are omitted.
-	 *
-	 * @throws \InvalidArgumentException If a name is not a non-empty string of allowed length.
+	 * @return array<string, string> File name => file URL; missing and unreadable files are omitted.
 	 */
-	public function getFileUrls(array $fileNames): array
+	public function getUrlsByNames(array $fileNames): array
 	{
 		if ($fileNames === [])
 		{
 			return [];
 		}
 
-		$fileNames = $this->validateFileNames($fileNames);
-
-		$found = $this->findFiles($fileNames);
-		if ($found === [])
+		$files = $this->findReadableFiles($fileNames);
+		if ($files === [])
 		{
 			return [];
 		}
 
-		$cacheId = md5(serialize($found));
+		$cacheId = md5(serialize($files));
 		$cache = Cache::createInstance();
 		if ($cache->initCache(self::CACHE_TTL, $cacheId, self::CACHE_DIR))
 		{
-			$cached = $cache->getVars();
-			if (is_array($cached) && !empty($cached['urls']) && is_array($cached['urls']))
+			$cachedVars = $cache->getVars();
+			if (!empty($cachedVars['urls']) && is_array($cachedVars['urls']))
 			{
-				return $cached['urls'];
+				return $cachedVars['urls'];
 			}
 		}
-
-		$urls = $this->buildUrls($found);
+		
+		$urls = $this->buildUrls($files);
 
 		$cache->forceRewriting(true);
+
 		if ($cache->startDataCache(self::CACHE_TTL, $cacheId, self::CACHE_DIR))
 		{
 			$cache->endDataCache(['urls' => $urls]);
@@ -79,74 +74,21 @@ class FileUrlProvider
 	}
 
 	/**
-	 * @param array $fileNames
-	 *
-	 * @return string[] Unique names.
-	 */
-	private function validateFileNames(array $fileNames): array
-	{
-		foreach ($fileNames as $fileName)
-		{
-			if (!is_string($fileName) || trim($fileName) === '' || mb_strlen($fileName) > self::MAX_FILE_NAME_LENGTH)
-			{
-				throw new \InvalidArgumentException('File names must be non-empty strings of valid length.');
-			}
-		}
-
-		return array_values(array_unique($fileNames));
-	}
-
-	/**
-	 * Looks up non-deleted files: Shared Drive first, then all storages for the missing names.
+	 * Looks up non-deleted Shared Drive files the current user can read.
 	 *
 	 * @param string[] $fileNames
-	 *
-	 * @return array<string, array{diskName: string, parentId: int}>
-	 */
-	private function findFiles(array $fileNames): array
-	{
-		$found = [];
-
-		$storageId = $this->getSharedStorageId();
-		if ($storageId !== null)
-		{
-			$found = $this->queryFiles($fileNames, $storageId);
-		}
-
-		$missingNames = array_values(array_filter(
-			$fileNames,
-			static fn (string $fileName): bool => !isset($found[$fileName])
-		));
-		if ($missingNames !== [])
-		{
-			$found += $this->queryFiles($missingNames, null);
-		}
-
-		return $found;
-	}
-
-	/**
-	 * @param string[] $fileNames
-	 * @param int|null $storageId Null for any storage.
 	 *
 	 * @return array<string, array{diskName: string, parentId: int}> Requested name => Disk name and parent folder.
 	 */
-	private function queryFiles(array $fileNames, ?int $storageId): array
+	private function findReadableFiles(array $fileNames): array
 	{
-		$filter = [
-			'=NAME' => $fileNames,
-			'=DELETED_TYPE' => self::DELETED_TYPE_NONE,
-		];
-		if ($storageId !== null)
+		$sharedStorage = $this->getSharedStorage();
+		if ($sharedStorage === null)
 		{
-			$filter['=STORAGE_ID'] = $storageId;
+			return [];
 		}
 
-		$rows = FileTable::getList([
-			'select' => ['ID', 'NAME', 'PARENT_ID'],
-			'filter' => $filter,
-			'order' => ['ID' => 'ASC'],
-		])->fetchAll();
+		$securityContext = $sharedStorage->getCurrentUserSecurityContext();
 
 		$requestedNames = [];
 		foreach ($fileNames as $fileName)
@@ -154,72 +96,70 @@ class FileUrlProvider
 			$requestedNames[mb_strtolower($fileName)] = $fileName;
 		}
 
-		$candidates = [];
-		foreach ($rows as $row)
+		$result = FileTable::getList([
+			'select' => ['ID', 'NAME', 'PARENT_ID'],
+			'filter' => [
+				'=NAME' => $fileNames,
+				'=STORAGE_ID' => $sharedStorage->getId(),
+				'=DELETED_TYPE' => self::DELETED_TYPE_NONE,
+			],
+			'order' => ['ID' => 'DESC'],
+		]);
+
+		$files = [];
+		while ($row = $result->fetch())
 		{
 			$diskName = (string)$row['NAME'];
 			$requestedName = $requestedNames[mb_strtolower($diskName)] ?? $diskName;
-			$candidates[$requestedName][(int)$row['ID']] = [
+
+			if (isset($files[$requestedName]) || !$securityContext->canRead((int)$row['ID']))
+			{
+				continue;
+			}
+
+			$files[$requestedName] = [
 				'diskName' => $diskName,
 				'parentId' => (int)$row['PARENT_ID'],
 			];
 		}
 
-		$found = [];
-		foreach ($candidates as $requestedName => $files)
-		{
-			$found[$requestedName] = $files[max(array_keys($files))];
-		}
-
-		return $found;
+		return $files;
 	}
 
-	private function getSharedStorageId(): ?int
+	private function getSharedStorage(): ?Storage
 	{
-		if ($this->sharedStorageResolved)
-		{
-			return $this->sharedStorageId;
-		}
-
-		$this->sharedStorageResolved = true;
-
 		$siteId = (string)Context::getCurrent()->getSite();
 		if ($siteId === '')
 		{
-			return $this->sharedStorageId = null;
+			return null;
 		}
 
-		$row = StorageTable::getList([
-			'select' => ['ID'],
-			'filter' => ['=ENTITY_ID' => self::SHARED_STORAGE_ENTITY_PREFIX . $siteId],
-			'limit' => 1,
-		])->fetch();
-
-		return $this->sharedStorageId = $row ? (int)$row['ID'] : null;
+		return Driver::getInstance()->getStorageByCommonId(self::SHARED_STORAGE_ENTITY_PREFIX . $siteId);
 	}
 
 	/**
-	 * @param array<string, array{diskName: string, parentId: int}> $found
+	 * @param array<string, array{diskName: string, parentId: int}> $files
 	 *
 	 * @return array<string, string>
 	 */
-	private function buildUrls(array $found): array
+	private function buildUrls(array $files): array
 	{
-		$folders = $this->loadFolders(array_values(array_unique(array_column($found, 'parentId'))));
+		$folders = $this->loadFolders(array_values(array_unique(array_column($files, 'parentId'))));
 
 		$urls = [];
-		foreach ($found as $requestedName => $file)
+		foreach ($files as $requestedName => $file)
 		{
-			$segments = $this->buildPathSegments($file['parentId'], $folders);
-			$segments[] = $file['diskName'];
-			$urls[$requestedName] = $this->buildUrl($segments);
+			$pathSegments = $this->buildFolderPathSegments($file['parentId'], $folders);
+			$pathSegments[] = $file['diskName'];
+			$urls[$requestedName] = $this->buildUrl($pathSegments);
 		}
 
 		return $urls;
 	}
 
+
 	/**
-	 * Loads folders with all ancestors, one query per nesting level.
+	 * Loads folders with all ancestors using a single database query.
 	 *
 	 * @param int[] $folderIds
 	 *
@@ -227,31 +167,54 @@ class FileUrlProvider
 	 */
 	private function loadFolders(array $folderIds): array
 	{
-		$pendingIds = array_values(array_diff($folderIds, array_keys($this->folders)));
+		$pendingIds = array_diff($folderIds, array_keys($this->folders));
 
-		for ($depth = 0; $depth < self::MAX_FOLDER_DEPTH && $pendingIds !== []; $depth++)
+		if ($pendingIds === [])
 		{
-			$rows = FolderTable::getList([
-				'select' => ['ID', 'NAME', 'PARENT_ID'],
-				'filter' => ['=ID' => $pendingIds],
-			])->fetchAll();
+			return $this->folders;
+		}
 
-			$parentIds = [];
-			foreach ($rows as $row)
+		$rows = FolderTable::getList([
+			'select' => ['ID', 'NAME', 'PARENT_ID'],
+		])->fetchAll();
+
+		$foldersById = [];
+
+		foreach ($rows as $row)
+		{
+			$folderId = (int)$row['ID'];
+
+			$foldersById[$folderId] = [
+				'name' => (string)$row['NAME'],
+				'parentId' => (int)$row['PARENT_ID'],
+			];
+		}
+
+		foreach ($pendingIds as $folderId)
+		{
+			$currentId = (int)$folderId;
+
+			for ($depth = 0; $depth < self::MAX_FOLDER_DEPTH && $currentId !== 0; $depth++)
 			{
-				$this->folders[(int)$row['ID']] = [
-					'name' => (string)$row['NAME'],
-					'parentId' => (int)$row['PARENT_ID'],
-				];
-				$parentIds[(int)$row['PARENT_ID']] = (int)$row['PARENT_ID'];
-			}
+				if (isset($this->folders[$currentId]))
+				{
+					break;
+				}
 
-			unset($parentIds[0]);
-			$pendingIds = array_values(array_diff_key($parentIds, $this->folders));
+				if (!isset($foldersById[$currentId]))
+				{
+					break;
+				}
+
+				$this->folders[$currentId] = $foldersById[$currentId];
+
+				$currentId = $foldersById[$currentId]['parentId'];
+			}
 		}
 
 		return $this->folders;
 	}
+
 
 	/**
 	 * Returns folder names from top to the file's folder, excluding the storage root.
@@ -260,7 +223,7 @@ class FileUrlProvider
 	 *
 	 * @return string[]
 	 */
-	private function buildPathSegments(int $folderId, array $folders): array
+	private function buildFolderPathSegments(int $folderId, array $folders): array
 	{
 		$segments = [];
 		$currentId = $folderId;
@@ -280,10 +243,10 @@ class FileUrlProvider
 	}
 
 	/**
-	 * @param string[] $segments Folder names followed by the file name.
+	 * @param string[] $pathSegments Folder names followed by the file name.
 	 */
-	private function buildUrl(array $segments): string
+	private function buildUrl(array $pathSegments): string
 	{
-		return self::SHARED_FILE_URL . implode('/', array_map('rawurlencode', $segments));
+		return self::SHARED_FILE_URL . implode('/', array_map('rawurlencode', $pathSegments));
 	}
 }

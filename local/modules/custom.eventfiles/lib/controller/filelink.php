@@ -7,39 +7,30 @@ use Bitrix\Main\Error;
 use Custom\EventFiles\Service\FileUrlProvider;
 
 /**
- * AJAX controller returning Shared Drive file links.
+ * AJAX controller returning Shared Drive links to files mentioned by name in the CRM history.
  */
-class Link extends Controller
+class FileLink extends Controller
 {
 	private const MAX_FILE_NAMES = 100;
 
-	private const MAX_FILE_NAME_LENGTH = FileUrlProvider::MAX_FILE_NAME_LENGTH;
+	private const MAX_FILE_NAME_LENGTH = 255;
 
 	private const FILE_NAME_FORBIDDEN_CHARS_PATTERN = '/[\\\\\/:*?"<>|\x00-\x1F]/u';
 
 	/**
 	 * @param string[] $fileNames
 	 *
-	 * @return array<string, string>|null File name => file URL.
+	 * @return array<string, string>|null File name => file URL; only files readable by the current user.
 	 */
-	public function getFileUrlsAction(array $fileNames): ?array
+	public function getUrlsAction(array $fileNames): ?array
 	{
-		$normalizedNames = $this->normalizeFileNames($fileNames);
-		if ($normalizedNames === null)
+		$validFileNames = $this->prepareFileNames($fileNames);
+		if ($validFileNames === null)
 		{
 			return null;
 		}
 
-		try
-		{
-			return (new FileUrlProvider())->getFileUrls($normalizedNames);
-		}
-		catch (\Throwable $exception)
-		{
-			$this->addError(new Error($exception->getMessage(), 'FILE_URLS_FAILED'));
-
-			return null;
-		}
+		return (new FileUrlProvider())->getUrlsByNames($validFileNames);
 	}
 
 	/**
@@ -47,7 +38,7 @@ class Link extends Controller
 	 *
 	 * @return string[]|null
 	 */
-	private function normalizeFileNames(array $fileNames): ?array
+	private function prepareFileNames(array $fileNames): ?array
 	{
 		if ($fileNames === [])
 		{
@@ -63,18 +54,18 @@ class Link extends Controller
 			return null;
 		}
 
-		$uniqueNames = [];
+		$uniqueFileNames = [];
 		foreach ($fileNames as $fileName)
 		{
 			$fileName = is_string($fileName) ? trim($fileName) : '';
 
 			if ($this->isValidFileName($fileName))
 			{
-				$uniqueNames[$fileName] = $fileName;
+				$uniqueFileNames[$fileName] = $fileName;
 			}
 		}
 
-		return array_values($uniqueNames);
+		return array_values($uniqueFileNames);
 	}
 
 	private function isValidFileName(string $fileName): bool
